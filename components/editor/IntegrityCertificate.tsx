@@ -28,7 +28,9 @@ export const IntegrityCertificate: React.FC<IntegrityCertificateProps> = ({
 
     const timestamp = Date.now();
     const qrData = JSON.stringify({ hash, timestamp, title });
-    const isEligible = score < 15;
+    
+    // Certificate eligibility: BOTH plagiarism score AND AI score must be below 20%
+    const isEligible = score < 20 && aiScore < 20;
 
     // Hash scramble animation effect
     useEffect(() => {
@@ -258,17 +260,17 @@ export const IntegrityCertificate: React.FC<IntegrityCertificateProps> = ({
                                     <div>
                                         <p className="text-[10px] font-black text-text-tertiary uppercase tracking-widest">Integrity Status</p>
                                         <p className={`text-lg font-black ${isEligible ? 'text-success' : 'text-warning'}`}>
-                                            {isEligible ? 'Verified Original' : 'Review Required'}
+                                            {isEligible ? 'Verified Original' : (score >= 20 && aiScore >= 20) ? 'Dual Review Required' : score >= 20 ? 'Plagiarism Review' : 'AI Content Review'}
                                         </p>
                                     </div>
                                 </div>
                                 <div className="text-right flex items-center gap-6">
                                     <div>
-                                        <p className={`text-4xl font-black ${isEligible ? 'text-success' : 'text-warning'}`}>{score}%</p>
+                                        <p className={`text-4xl font-black ${score < 20 ? 'text-success' : 'text-warning'}`}>{score}%</p>
                                         <p className="text-[9px] font-bold text-text-tertiary uppercase tracking-tighter">Similarity</p>
                                     </div>
                                     <div className="border-l pl-6" style={{ borderColor: 'var(--border-subtle)' }}>
-                                        <p className={`text-4xl font-black ${aiScore > 20 ? 'text-warning' : 'text-success'}`}>{aiScore}%</p>
+                                        <p className={`text-4xl font-black ${aiScore < 20 ? 'text-success' : 'text-warning'}`}>{aiScore}%</p>
                                         <p className="text-[9px] font-bold text-text-tertiary uppercase tracking-tighter">AI Origin</p>
                                     </div>
                                 </div>
@@ -326,14 +328,19 @@ export const IntegrityCertificate: React.FC<IntegrityCertificateProps> = ({
                                 ) : (
                                     <>
                                         <Shield size={18} />
-                                        Score must be below 15% to download
+                                        Both scores must be below 20% to download
                                     </>
                                 )}
                             </motion.button>
 
                             {!isEligible && (
                                 <p className="text-center text-[10px] text-text-tertiary italic">
-                                    Certificates are only available for documents with similarity scores below the institutional threshold.
+                                    {score >= 20 && aiScore >= 20 
+                                        ? 'Both similarity score and AI origin score must be below 20% to receive a certificate.'
+                                        : score >= 20 
+                                            ? `Similarity score (${score}%) must be below 20% to receive a certificate.`
+                                            : `AI origin score (${aiScore}%) must be below 20% to receive a certificate.`
+                                    }
                                 </p>
                             )}
                         </div>

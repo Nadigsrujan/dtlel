@@ -1,7 +1,15 @@
 import OpenAI from "openai";
 import type { SimilarityAnalysis } from '../types';
+import nlp from 'compromise';
 
-const apiKey = import.meta.env.VITE_API_KEY || process.env.API_KEY;
+const getApiKey = () => {
+  if (typeof import.meta !== 'undefined' && import.meta.env) {
+    return import.meta.env.VITE_API_KEY;
+  }
+  return process.env.API_KEY || process.env.OPENAI_API_KEY;
+};
+
+const apiKey = getApiKey();
 if (!apiKey) {
   console.warn("⚠️  API_KEY not found. Please set VITE_API_KEY in .env");
 }
@@ -11,212 +19,309 @@ const openai = new OpenAI({
   dangerouslyAllowBrowser: true
 });
 
+// ============================================================================
+// CORE AI DETECTION LOGIC (LLM-SPECIFIC PATTERN ANALYSIS)
+// ============================================================================
+
 /**
- * Calculates a deterministic AI probability based on linguistic markers
- * (Burstiness, Perplexity approximation, and stylistic variance)
+ * Detects AI-generated text by looking for LLM-specific patterns.
+ * IMPORTANT: Formal writing is NOT automatically AI. 
+ * We look for specific "LLM fingerprints" that humans rarely produce.
  */
-function calculateLinguisticAIProbability(text: string): number {
-  const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
-  if (sentences.length === 0) return 0;
-
-  const sentenceWordCounts = sentences.map(s => s.trim().split(/\s+/).length);
-  const avgSentenceLength = sentenceWordCounts.reduce((a, b) => a + b, 0) / sentences.length;
-
-  // 1. BURSTINESS (Variance in sentence length)
-  // AI tends to have consistent sentence lengths (low variance)
-  const variance = sentenceWordCounts.reduce((a, b) => a + Math.pow(b - avgSentenceLength, 2), 0) / sentences.length;
-  const burstinessScore = Math.min(100, Math.max(0, 100 - (Math.sqrt(variance) * 5))); // Lower variance = Higher AI probability
-
-  // 2. VOCABULARY DIVERSITY (Type-Token Ratio)
-  // AI often uses a more repetitive/optimized vocabulary
-  const words = text.toLowerCase().match(/\b\w+\b/g) || [];
-  const uniqueWords = new Set(words);
-  const ttr = words.length > 0 ? uniqueWords.size / words.length : 1;
-  const vocabScore = Math.min(100, Math.max(0, (1 - ttr) * 200)); // Lower diversity = Higher AI probability
-
-  // 3. COMMON AI CONNECTORS
-  const aiConnectors = ['additionally', 'moreover', 'furthermore', 'consequently', 'in conclusion', 'it is important to note', 'testament to'];
-  const connectorCount = words.filter(w => aiConnectors.includes(w)).length;
-  const connectorScore = Math.min(100, (connectorCount / sentences.length) * 150);
-
-  // Blended Heuristic Score (40% Burstiness, 40% Vocab, 20% Stylistic)
-  return Math.round((burstinessScore * 0.4) + (vocabScore * 0.4) + (connectorScore * 0.2));
-}
-
-export const analyzeSemanticSimilarity = async (content: string): Promise<SimilarityAnalysis> => {
+async function detectAIGenerated(text: string): Promise<{ aiScore: number, explanation: string }> {
   try {
-    console.log("Starting academic integrity analysis...");
-
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
         {
           role: "system",
-          content: `You are a forensic academic integrity engine. You must analyze the submission using a strict tripartite mathematical model:
+          content: `You are an expert at detecting AI-GENERATED text (from ChatGPT, Claude, GPT-4, etc).
 
-1. EXACT MATCH DETECTION (Weight: 1.0):
-   - Identify character-for-character sequences (7+ words).
-   - Flag as "exact".
+AI DETECTION PATTERNS (score HIGH if present):
 
-2. PATCHWRITING DETECTION (Weight: 0.6):
-   - Identify "Near-Duplicates" (0.70 – 0.80 structural/semantic similarity).
-   - This includes "Rogeting" (swapping words while keeping structure).
-   - Flag as "patchwriting".
+1. **Educational "Explainer" Style**:
+   - Text that explains a concept broadly without personal insight
+   - Covers multiple aspects superficially (breadth over depth)
+   - Sounds like a Wikipedia summary or textbook introduction
+   - Example: "X is one of the most influential... revolutionized... at the core of X is..."
 
-3. SEMANTIC OVERLAP DETECTION (Weight: 0.2):
-   - Analyze the overall thematic alignment with known academic works.
-   - Summarize this as a global "semantic_overlap" score (0-100).
+2. **LLM-Specific Phrases**:
+   - "It's important to note", "It's worth mentioning"
+   - "On one hand... on the other hand"
+   - "In conclusion", "Overall", "To summarize"
+   - "significantly", "revolutionized", "fundamental"
 
-SCORING FORMULA:
-Final Score = (Exact_Coverage × 1.0) + (Patchwriting_Coverage × 0.6) + (Semantic_Overlap × 0.2)
+3. **Structural Patterns**:
+   - Intro → Multiple points → Conclusion format
+   - Each paragraph covers a different aspect
+   - Balanced, comprehensive coverage of a topic
+   - No personal opinions or unique insights
 
-CRITICAL RULES:
-- If EXACT similarity > 30%, identify as "High-risk" regardless of other scores.
-- Return EXACT substrings from the input for segments.
-- AI Score: Probability (0-100) of synthetic origin using Perplexity/Burstiness.`
+4. **Content Characteristics**:
+   - Explains what something IS rather than arguing a point
+   - No specific dates, names, or citations
+   - Generic examples instead of concrete ones
+   - Reads like an answer to "Explain X to me"
+
+CRITICAL: If text reads like a response to "Write me an explanation of [topic]", it's likely AI (score 70+).
+
+THESE ARE HUMAN INDICATORS (score LOW):
+- Personal anecdotes or experiences
+- Specific citations with dates/authors
+- Unique opinions or controversial takes
+- Conversational tone with personality
+
+ACTUAL WIKIPEDIA/ENCYCLOPEDIA TEXT (score 30-40%, NOT AI):
+- Uses em-dashes (—) for parenthetical info
+- Has very precise, factual definitions
+- Contains specific technical terminology without explanation
+- NO "Overall", "In conclusion", or summary paragraphs
+- Structured as encyclopedia entries, not explanations
+- Example: "A robot is a machine—especially one programmable by a computer—capable of..."
+- If text looks like it was COPIED from Wikipedia (not written about a Wikipedia topic), score LOW
+
+SCORING:
+- 80-100%: Clearly AI-generated explainer content
+- 60-79%: Likely AI-assisted or edited AI
+- 40-59%: Could be either, some patterns present
+- 0-39%: Human-written with clear voice/specifics
+
+OUTPUT JSON: { "ai_probability": number, "reasoning": string }`
         },
         {
           role: "user",
-          content: `Perform a dual analysis (Similarity + AI Origin) on this submission:
-
-${content}
-
-Word count: ${content.split(/\s+/).filter(w => w.length > 0).length} words`
+          content: `ANALYZE FOR AI GENERATION:\n\n${text}`
         }
       ],
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "integrity_analysis",
-          strict: true,
-          schema: {
-            type: "object",
-            properties: {
-              score: {
-                type: "number",
-                description: "Final Weighted Score using formula"
-              },
-              exact_similarity: {
-                type: "number",
-                description: "Percentage of words identified as exact matches"
-              },
-              patchwriting_similarity: {
-                type: "number",
-                description: "Percentage of words identified as patchwriting/near-duplicates"
-              },
-              semantic_overlap: {
-                type: "number",
-                description: "Overall thematic overlap score (0-100)"
-              },
-              aiScore: {
-                type: "number",
-                description: "AI Origin Probability (0-100)"
-              },
-              summary: {
-                type: "string",
-                description: "Executive summary."
-              },
-              riskLevel: {
-                type: "string",
-                enum: ["Acceptable", "Potential Patchwriting", "High-risk"],
-                description: "Overall risk assessment"
-              },
-              suggestions: {
-                type: "array",
-                items: { type: "string" },
-                description: "Revision strategies"
-              },
-              references: {
-                type: "array",
-                description: "Academic sources.",
-                items: {
-                  type: "object",
-                  properties: {
-                    title: { type: "string" },
-                    url: { type: "string" }
-                  },
-                  required: ["title", "url"],
-                  additionalProperties: false
-                }
-              },
-              segments: {
-                type: "array",
-                items: {
-                  type: "object",
-                  properties: {
-                    text: { type: "string" },
-                    similarity: { type: "number" },
-                    type: { type: "string", enum: ["exact", "patchwriting", "semantic"] },
-                    source: { type: "string" },
-                    explanation: { type: "string" }
-                  },
-                  required: ["text", "similarity", "type", "source", "explanation"],
-                  additionalProperties: false
-                }
-              }
-            },
-            required: ["score", "exact_similarity", "patchwriting_similarity", "semantic_overlap", "aiScore", "summary", "riskLevel", "suggestions", "segments", "references"],
-            additionalProperties: false
-          }
-        }
-      },
-      temperature: 0.2, // Lower temperature for more consistent analysis
-      top_p: 0.95,
-      max_tokens: 4000
+      response_format: { type: "json_object" },
+      temperature: 0.0,
+      seed: 12345,
+      top_p: 0.1,
+      max_tokens: 1000
     });
 
-    const responseContent = response.choices[0].message.content;
-    if (!responseContent) throw new Error("No content in response");
+    const content = response.choices[0].message.content;
+    if (!content) throw new Error("No analysis returned");
+    const result = JSON.parse(content);
 
-    const parsed = JSON.parse(responseContent) as SimilarityAnalysis;
+    return {
+      aiScore: result.ai_probability || 0,
+      explanation: result.reasoning || "No explanation provided."
+    };
 
-    // MATH-DRIVEN TRIPARTITE SCORING
-    const wordPattern = /\b\w+\b/g;
-    const totalWords = (content.match(wordPattern) || []).length;
-
-    let exactMatchWords = 0;
-    let patchwritingWords = 0;
-
-    parsed.segments.forEach(seg => {
-      const segmentWordCount = (seg.text.match(wordPattern) || []).length;
-      if (seg.type === 'exact') exactMatchWords += segmentWordCount;
-      if (seg.type === 'patchwriting') patchwritingWords += segmentWordCount;
-    });
-
-    const exactCoverage = totalWords > 0 ? (exactMatchWords / totalWords) * 100 : 0;
-    const patchwritingCoverage = totalWords > 0 ? (patchwritingWords / totalWords) * 100 : 0;
-    const semanticOverlap = parsed.semantic_overlap;
-
-    // Formula: (Exact × 1.0) + (Patchwriting × 0.6) + (Semantic × 0.2)
-    const finalSimilarityScore = Math.min(100, Math.round(
-      (exactCoverage * 1.0) +
-      (patchwritingCoverage * 0.6) +
-      (semanticOverlap * 0.2)
-    ));
-
-    parsed.exact_similarity = Math.round(exactCoverage * 10) / 10;
-    parsed.patchwriting_similarity = Math.round(patchwritingCoverage * 10) / 10;
-    parsed.score = finalSimilarityScore;
-
-    // AI Score Blending
-    const heuristicAiScore = calculateLinguisticAIProbability(content);
-    parsed.aiScore = Math.round((parsed.aiScore * 0.6) + (heuristicAiScore * 0.4));
-
-    // Risk Classification (Logic: if exact > 30% -> High risk)
-    const expectedRisk = (parsed.exact_similarity > 30 || parsed.score > 40) ? "High-risk" :
-      (parsed.score >= 15) ? "Potential Patchwriting" : "Acceptable";
-
-    parsed.riskLevel = expectedRisk;
-
-    return parsed;
-  } catch (e) {
-    console.error("Failed to analyze content:", e);
-    if (e instanceof Error) {
-      console.error("Error message:", e.message);
-      console.error("Error stack:", e.stack);
-    }
-    throw new Error(`Analysis failed: ${e instanceof Error ? e.message : 'Unknown error'}`);
+  } catch (error) {
+    console.error("AI detection failed:", error);
+    return { aiScore: 0, explanation: "Analysis failed." };
   }
+}
+
+// ============================================================================
+// PLAGIARISM/SIMILARITY DETECTION (INTERNET SOURCE MATCHING)
+// ============================================================================
+
+/**
+ * Detects if text was copied from existing internet sources.
+ * This is SEPARATE from AI detection - copied human text is plagiarism, not AI.
+ */
+async function detectPlagiarism(text: string): Promise<{ score: number, segments: any[], isFromInternet: boolean, specificSource: string, allSources: string[] }> {
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        {
+          role: "system",
+          content: `You are an EXPERT PLAGIARISM DETECTION system that identifies SPECIFIC SOURCES.
+
+YOUR TASK: Analyze text and identify WHERE it was copied from with SPECIFIC source names.
+
+SOURCE IDENTIFICATION RULES:
+
+1. **Academic/Research Sources** - Be SPECIFIC:
+   - arXiv papers (e.g., "arXiv - Attention Is All You Need")
+   - IEEE/ACM publications
+   - Nature, Science journals
+   - Conference papers (NeurIPS, ICML, etc.)
+   - For transformer/AI content: likely from "arXiv - Vaswani et al. 2017" or Wikipedia
+
+2. **Wikipedia** - Identify the article:
+   - "Wikipedia - Transformer (machine learning model)"
+   - "Wikipedia - Deep learning"
+   - "Wikipedia - Neural network"
+
+3. **Educational/Textbook**:
+   - "Deep Learning textbook (Goodfellow et al.)"
+   - "Stanford CS229 course materials"
+   - "MIT OpenCourseWare"
+
+4. **News/Blogs**:
+   - "Towards Data Science"
+   - "Medium AI articles"
+   - "TechCrunch", "Wired", etc.
+
+SEGMENT ANALYSIS:
+For each distinct paragraph or section, identify:
+- The specific text segment
+- The most likely source (BE SPECIFIC - use actual names)
+- Similarity percentage (how closely it matches known content)
+
+SCORING:
+- 85-100%: Verbatim or near-verbatim from identifiable source
+- 70-84%: Heavily paraphrased from known source
+- 50-69%: Common explanations found in multiple sources
+- 0-49%: Likely original
+
+OUTPUT JSON:
+{
+  "score": number,
+  "is_from_internet": boolean,
+  "specific_source": string (PRIMARY source - be specific like "Wikipedia - Transformer (machine learning)" or "arXiv - Attention Is All You Need"),
+  "all_sources": [string] (list ALL identified sources),
+  "segments": [
+    {
+      "text": string (the copied portion, 50-150 chars),
+      "source": string (SPECIFIC source name),
+      "similarity": number (0-100)
+    }
+  ]
+}`
+        },
+        {
+          role: "user",
+          content: `ANALYZE FOR PLAGIARISM:\n\n${text}`
+        }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.0,
+      seed: 12345,
+      top_p: 0.1,
+    });
+
+    const content = response.choices[0].message.content;
+    const result = content ? JSON.parse(content) : { score: 0, segments: [], is_from_internet: false, specific_source: "none", all_sources: [] };
+    
+    // Only trust "isFromInternet" if there's an actual specific source
+    const hasSpecificSource = result.specific_source && result.specific_source !== "none" && result.specific_source !== "";
+    
+    // Format segments with proper type field for UI display
+    const formattedSegments = (result.segments || []).map((seg: any) => ({
+      text: seg.text || "",
+      source: seg.source || result.specific_source || "Unknown source",
+      similarity: (seg.similarity || 0) / 100, // Convert to 0-1 range
+      type: 'exact' as const
+    }));
+    
+    return {
+      score: result.score || 0,
+      segments: formattedSegments,
+      isFromInternet: hasSpecificSource && result.is_from_internet,
+      specificSource: result.specific_source || "none",
+      allSources: result.all_sources || []
+    };
+  } catch (error) {
+    console.error("Plagiarism detection failed:", error);
+    return { score: 0, segments: [], isFromInternet: false, specificSource: "none", allSources: [] };
+  }
+}
+
+// ============================================================================
+// MAIN ANALYSIS FUNCTION
+// ============================================================================
+
+export const analyzeSemanticSimilarity = async (rawContent: string): Promise<SimilarityAnalysis> => {
+  const content = rawContent.replace(/\r?\n|\r/g, ' ').replace(/\s+/g, ' ').trim();
+  
+  console.log("Starting Analysis...");
+
+  // Run AI and Plagiarism detection in parallel
+  const [aiResult, plagiarismResult] = await Promise.all([
+    detectAIGenerated(content),
+    detectPlagiarism(content)
+  ]);
+
+  console.log(`[LLM] AI: ${aiResult.aiScore}% | Plagiarism: ${plagiarismResult.score}% | Source: ${plagiarismResult.specificSource}`);
+
+  let finalAiScore = aiResult.aiScore;
+  let finalPlagiarismScore = plagiarismResult.score;
+  const confirmedSource = plagiarismResult.specificSource;
+  const segments = plagiarismResult.segments || [];
+
+  // NEW SCORING PHILOSOPHY:
+  // - Report BOTH AI and plagiarism scores accurately
+  // - AI-generated text about common topics WILL match Wikipedia/sources
+  // - Don't suppress AI score just because sources were found
+  // - Only reduce scores when there's clear evidence one dominates
+  
+  // CASE 1: BOTH HIGH (AI >= 60% AND Plagiarism >= 70%)
+  // This means: AI generated text that sounds like existing sources
+  // Report BOTH scores - user needs to know it's AI-written but sounds like copied content
+  if (aiResult.aiScore >= 60 && finalPlagiarismScore >= 70) {
+    console.log("Detected: AI-GENERATED text that matches existing sources.");
+    // Keep both scores high - this is accurate
+    finalAiScore = aiResult.aiScore;
+    // Slightly reduce plagiarism since content may be AI-regenerated, not copied
+    finalPlagiarismScore = Math.max(finalPlagiarismScore - 15, 50);
+  }
+  // CASE 2: HIGH PLAGIARISM, LOW AI (Plagiarism >= 70%, AI < 40%)
+  // This is truly copied human text
+  else if (finalPlagiarismScore >= 70 && aiResult.aiScore < 40) {
+    console.log(`COPIED CONTENT: From "${plagiarismResult.specificSource}"`);
+    finalAiScore = aiResult.aiScore;
+  }
+  // CASE 3: HIGH AI, MODERATE/LOW PLAGIARISM (AI >= 60%, Plagiarism < 70%)
+  // AI-generated content, reduce plagiarism since it's regenerated not copied
+  else if (aiResult.aiScore >= 60 && finalPlagiarismScore < 70) {
+    console.log("Detected: AI-GENERATED content.");
+    finalAiScore = aiResult.aiScore;
+    finalPlagiarismScore = Math.min(finalPlagiarismScore, 30);
+  }
+  // CASE 4: LOW BOTH - Original human writing
+  else if (aiResult.aiScore < 40 && finalPlagiarismScore < 50) {
+    console.log("Detected: Likely original human writing.");
+  }
+  // CASE 5: MODERATE SIGNALS - Report as-is
+  else {
+    console.log("Detected: Mixed signals - reporting raw scores.");
+  }
+
+  // Determine Risk Level
+  let riskLevel: 'Acceptable' | 'Potential Patchwriting' | 'High-risk' = 'Acceptable';
+  if (finalAiScore > 70 || finalPlagiarismScore > 60) riskLevel = 'High-risk';
+  else if (finalAiScore > 40 || finalPlagiarismScore > 30) riskLevel = 'Potential Patchwriting';
+
+  // Generate Summary
+  let summary = "";
+  if (finalAiScore >= 60 && finalPlagiarismScore >= 50) {
+    // Both high - AI generated content that sounds like existing sources
+    summary = `⚠️ AI-GENERATED (${finalAiScore}%) content that resembles existing sources (${finalPlagiarismScore}% similarity to ${confirmedSource || 'online content'}). ${aiResult.explanation}`;
+  } else if (finalAiScore >= 60) {
+    summary = `High probability of AI generation (${finalAiScore}%). ${aiResult.explanation}`;
+  } else if (finalPlagiarismScore > 50) {
+    summary = `⚠️ High similarity to external sources (${finalPlagiarismScore}%). Likely copied from ${confirmedSource || 'online sources'}.`;
+  } else if (finalAiScore > 30 || finalPlagiarismScore > 20) {
+    summary = `Mixed signals detected. Some characteristics suggest AI assistance or borrowed content.`;
+  } else {
+    summary = `This appears to be original human writing with no significant AI or plagiarism indicators.`;
+  }
+
+  // Build references from identified sources
+  const allSources = plagiarismResult.allSources || [];
+  if (confirmedSource && confirmedSource !== "none" && !allSources.includes(confirmedSource)) {
+    allSources.unshift(confirmedSource);
+  }
+  const references = allSources.map(src => ({ title: src, url: src }));
+
+  return {
+    score: Math.round(finalPlagiarismScore),
+    exact_similarity: Math.round(finalPlagiarismScore),
+    patchwriting_similarity: 0,
+    semantic_overlap: 0,
+    aiScore: Math.round(finalAiScore),
+    summary,
+    riskLevel,
+    suggestions: [],
+    segments,
+    references
+  };
 };
 
 export const getWritingSuggestions = async (content: string): Promise<string> => {
@@ -234,6 +339,7 @@ export const getWritingSuggestions = async (content: string): Promise<string> =>
         }
       ],
       temperature: 0.7,
+      seed: 123,
       max_tokens: 500
     });
 
@@ -289,4 +395,5 @@ export const paraphraseSentence = async (sentence: string): Promise<string[]> =>
     return ["Error generating paraphrases. Please try again."];
   }
 };
+
 
