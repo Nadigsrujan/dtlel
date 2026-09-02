@@ -1,4 +1,4 @@
-# Academic Integrity Guardian
+# Academic Integrity Verification Engine
 
 AI-powered academic integrity platform with plagiarism detection, reference matching, and originality certification.
 
